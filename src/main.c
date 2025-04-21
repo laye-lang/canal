@@ -1,3 +1,11 @@
+#ifndef _WIN32
+#    define _POSIX_C_SOURCE 200809L
+#    include <unistd.h>
+#else
+#    define WIN32_LEAN_AND_MEAN
+#    include <windows.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -92,10 +100,61 @@ void canal_collect_directives(Arena *arena, Canal_Check *check, String_View sour
     }
 }
 
-void canal_check(Arena *arena, Nob_Cmd *cmd, Canal_Check *check, const char *filepath) {
+typedef struct {
+    String final_command;
+    bool err;
+    String error_message;
+} Canal_Check_Result;
+
+typedef struct {
+    Canal_Check_Result *items;
+    size_t count;
+    size_t capacity;
+} Canal_Check_Results;
+
+bool canal_run_command(Arena *arena, Nob_Cmd *cmd, Canal_Check_Result *check_result, String *file_data) {
+    bool result = true;
+
+    // TODO(nic): maybe find a way of creating temp file without fisically creating it
+    const char *temp_out_filepath = "temp.out";
+    const char *temp_err_filepath = "temp.err";
+
+    Nob_Fd fdout = nob_fd_open_for_write(temp_out_filepath);
+    assert(fdout != NOB_INVALID_FD);
+
+    Nob_Fd fderr = nob_fd_open_for_write(temp_err_filepath);
+    assert(fderr != NOB_INVALID_FD);
+
+    Nob_Cmd_Redirect cmd_redirect = {
+        .fdout = &fdout,
+        .fderr = &fderr,
+    };
+
+    if (!nob_cmd_run_sync_redirect_and_reset(cmd, cmd_redirect)) {
+        check_result->err = true;
+        read_entire_file(arena, &check_result->error_message, temp_err_filepath);
+        if (check_result->error_message.count <= 0) {
+            str_append_fmt(arena, &check_result->error_message, "<failed with no message>\n");
+        }
+        return_defer(false);
+    }
+    read_entire_file(arena, file_data, temp_out_filepath);
+
+defer:
+    nob_delete_file(temp_out_filepath);
+    nob_delete_file(temp_err_filepath);
+    return result;
+}
+
+Canal_Check_Results canal_check(Arena *arena, Nob_Cmd *cmd, Canal_Check *check, const char *filepath) {
+    Canal_Check_Results results = {0};
+
     for (size_t i = 0; i < check->r_directives.count; ++i) {
         Canal_Directive *r_directive = &check->r_directives.items[i];
         assert(r_directive->action == CANAL_ACTION_RUN);
+
+        arena_da_append(arena, &results, (Canal_Check_Result) {0});
+        Canal_Check_Result *result = &results.items[results.count - 1];
 
         String_View args = r_directive->arguments;
         while (args.count > 0) {
@@ -103,7 +162,7 @@ void canal_check(Arena *arena, Nob_Cmd *cmd, Canal_Check *check, const char *fil
             String_View arg_fmt = sv_chop_predicate(&args, not_isspace);
             if (arg_fmt.count == 0) break;
 
-            // TODO(nic): implement proper foramtting
+            // TODO(nic): implement proper formatting
             String arg = {0};
             if (sv_eq(arg_fmt, SV("%s"))) {
                 str_append_cstr(arena, &arg, filepath);
@@ -114,27 +173,21 @@ void canal_check(Arena *arena, Nob_Cmd *cmd, Canal_Check *check, const char *fil
             }
             nob_cmd_append(cmd, arg.items);
         }
+        // NOTE(nic): Nob_String_Builder and String are the same thing
+        nob_cmd_render(*cmd, (Nob_String_Builder*)&result->final_command);
 
-        // TODO(nic): maybe find a way of creating temp file without fisically creating it
-        const char *temp_filepath = "./temp";
-        Nob_Fd fdout = nob_fd_open_for_write(temp_filepath);
-        Nob_Cmd_Redirect cmd_redirect = {
-            .fdout = &fdout,
-        };
-        // TODO(nic): check for errors in all these calls
-        nob_cmd_run_sync_redirect_and_reset(cmd, cmd_redirect);
         String file_data = {0};
-        read_entire_file(arena, &file_data, temp_filepath);
-        nob_fd_close(fdout);
-
-        nob_cmd_append(cmd, "rm", temp_filepath);
-        nob_cmd_run_sync_and_reset(cmd);
-
-        printf(STR_FMT"\n", STR_ARG(&file_data));
+        if (!canal_run_command(arena, cmd, result, &file_data)) {
+            continue;
+        }
     }
+
+    return results;
 }
 
 int main(int argc, const char **argv) {
+    nob_minimal_log_level = NOB_NO_LOGS;
+
     if (argc <= 1) {
         fprintf(stderr, "Error: expected filepath\n");
         exit(1);
@@ -155,9 +208,24 @@ int main(int argc, const char **argv) {
     canal_collect_directives(&arena, &check, source);
 
     Nob_Cmd cmd = {0};
-    canal_check(&arena, &cmd, &check, filepath);
-
+    Canal_Check_Results results = canal_check(&arena, &cmd, &check, filepath);
     nob_cmd_free(cmd);
+
+    for (size_t i = 0; i < results.count; ++i) {
+        Canal_Check_Result *result = &results.items[i];
+        printf("[Check %zu] ("STR_FMT"):\n", i + 1, STR_ARG(&result->final_command));
+
+        if (result->err) {
+            fprintf(stderr, STR_FMT, STR_ARG(&result->error_message));
+        } else {
+            printf("Passed!\n");
+        }
+
+        if (i < results.count - 1) {
+            printf("\n");
+        }
+    }
+
     arena_free(&arena);
     return 0;
 }

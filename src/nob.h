@@ -923,7 +923,12 @@ Nob_Proc nob_cmd_run_async_redirect(Nob_Cmd cmd, Nob_Cmd_Redirect redirect)
     nob_sb_free(sb);
 
     if (!bSuccess) {
-        nob_log(NOB_ERROR, "Could not create child process: %s", nob_win32_error_message(GetLastError()));
+        const char *msg = nob_win32_error_message(GetLastError());
+        if (redirect.fderr) {
+            WriteFile(*redirect.fderr, msg, strlen(msg), NULL, NULL);
+            WriteFile(*redirect.fderr, "\n", sizeof(char), NULL, NULL);
+        }
+        nob_log(NOB_ERROR, "Could not create child process: %s", msg);
         return NOB_INVALID_PROC;
     }
 
@@ -966,7 +971,12 @@ Nob_Proc nob_cmd_run_async_redirect(Nob_Cmd cmd, Nob_Cmd_Redirect redirect)
         nob_cmd_append(&cmd_null, NULL);
 
         if (execvp(cmd.items[0], (char * const*) cmd_null.items) < 0) {
-            nob_log(NOB_ERROR, "Could not exec child process: %s", strerror(errno));
+            const char *msg = strerror(errno);
+            if (redirect.fderr) {
+                write(*redirect.fderr, msg, strlen(msg));
+                write(*redirect.fderr, "\n", sizeof(char));
+            }
+            nob_log(NOB_ERROR, "Could not exec child process: %s", msg);
             exit(1);
         }
         NOB_UNREACHABLE("nob_cmd_run_async_redirect");
