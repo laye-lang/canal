@@ -44,9 +44,11 @@ defer:
 }
 
 typedef enum {
-    CANAL_ACTION_ASTERISK,
+    CANAL_ACTION_STAR,
     CANAL_ACTION_PLUS,
+    CANAL_ACTION_BANG,
     CANAL_ACTION_RUN,
+    CANAL_ACTION_COUNT,
 } Canal_Action;
 
 typedef struct {
@@ -83,10 +85,14 @@ void canal_collect_directives(Arena *arena, Canal_Check *check, String_View sour
 
             Canal_Directive directive = {0};
             directive.arguments = arguments;
+
+            static_assert(CANAL_ACTION_COUNT == 4, "Number of actions change, update code here!");
             if (sv_eq(action, sv_from_cstr("*"))) {
-                directive.action = CANAL_ACTION_ASTERISK;
+                directive.action = CANAL_ACTION_STAR;
             } else if (sv_eq(action, sv_from_cstr("+"))) {
                 directive.action = CANAL_ACTION_PLUS;
+            } else if (sv_eq(action, sv_from_cstr("!"))) {
+                directive.action = CANAL_ACTION_BANG;
             } else if (sv_eq(action, sv_from_cstr("R"))) {
                 directive.action = CANAL_ACTION_RUN;
             } else {
@@ -149,6 +155,7 @@ defer:
 }
 
 typedef struct {
+    String_View last_line;
     String_View content;
     size_t line;
 } Source;
@@ -160,6 +167,7 @@ String_View canal_source_next_line(Source *source) {
     }
     String_View line = sv_chop_by_delim(&source->content, '\n');
     source->line += 1;
+    source->last_line = line;
     return line;
 }
 
@@ -178,7 +186,7 @@ bool canal_lines_match_ignore_whitespace(String_View a, String_View b) {
     return true;
 }
 
-bool canal_handle_action_asterisk(Arena *arena, Source *source, String_View arguments, Canal_Result *result) {
+bool canal_handle_action_star(Arena *arena, Source *source, String_View arguments, Canal_Result *result) {
     while (true) {
         if (source->content.count <= 0) {
             result->err = true;
@@ -194,18 +202,35 @@ bool canal_handle_action_asterisk(Arena *arena, Source *source, String_View argu
 }
 
 bool canal_handle_action_plus(Arena *arena, Source *source, String_View arguments, Canal_Result *result) {
+    if (source->content.count <= 0) {
+        result->err = true;
+        str_append_fmt(arena, &result->error_message, "Unexpected end of input\n");
+        return false;
+    }
     String_View line = canal_source_next_line(source);
     if (!canal_lines_match_ignore_whitespace(line, arguments)) {
         result->err = true;
         str_append_fmt(arena, &result->error_message, "%zu: Found '"SV_Fmt"', expected '"SV_Fmt"'\n", source->line, SV_Arg(line), SV_Arg(arguments));
-        return true;
+        return false;
     }
-    return false;
+    return true;
 }
 
+bool canal_handle_action_bang(Arena *arena, Source *source, String_View arguments, Canal_Result *result) {
+    String_View line = source->last_line;
+    if (canal_lines_match_ignore_whitespace(line, arguments)) {
+        result->err = true;
+        str_append_fmt(arena, &result->error_message, "%zu: Found unexpected '"SV_Fmt"'\n", source->line, SV_Arg(line), SV_Arg(arguments));
+        return false;
+    }
+    return true;
+}
+
+static_assert(CANAL_ACTION_COUNT == 4, "Number of actions change, update code here!");
 Canal_Action_Func canal_action_funcs[] = {
-    [CANAL_ACTION_ASTERISK] = canal_handle_action_asterisk,
+    [CANAL_ACTION_STAR] = canal_handle_action_star,
     [CANAL_ACTION_PLUS] = canal_handle_action_plus,
+    [CANAL_ACTION_BANG] = canal_handle_action_bang,
     [CANAL_ACTION_RUN] = NULL,
 };
 
@@ -213,12 +238,6 @@ void canal_match(Arena *arena, Source source, Canal_Directives *directives, Cana
     for (size_t i = 0; i < directives->count; ++i) {
         Canal_Directive *directive = &directives->items[i];
         assert(directive->action != CANAL_ACTION_RUN);
-
-        if (source.content.count <= 0) {
-            result->err = true;
-            str_append_fmt(arena, &result->error_message, "Unexpected end of input\n");
-            return;
-        }
 
         Canal_Action_Func action_func = canal_action_funcs[directive->action];
         if (!action_func(arena, &source, directive->arguments, result)) {

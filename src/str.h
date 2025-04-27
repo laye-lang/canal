@@ -3,10 +3,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
-#include <string.h>
 #include <stdbool.h>
-#include <ctype.h>
+#include <string.h>
 #include <stdarg.h>
 
 #include "./arena.h"
